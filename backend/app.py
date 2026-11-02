@@ -1,4 +1,5 @@
 import os
+import sys
 import io
 import csv
 import logging
@@ -7,7 +8,15 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-import database
+# Ensure backend directory is prioritized in sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+try:
+    from backend import database
+except ImportError:
+    import database
 
 # Load environment
 load_dotenv()
@@ -789,7 +798,11 @@ except Exception as e:
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("BACKEND_PORT", 5000))
+    port_str = os.getenv("PORT") or os.getenv("BACKEND_PORT") or "5000"
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 5000
     debug_mode = os.getenv("FLASK_DEBUG", "0") in ("1", "true", "True")
     logger.info(f"Starting Smart Weather Backend server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=debug_mode)

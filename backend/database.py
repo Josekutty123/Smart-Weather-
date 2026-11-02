@@ -10,41 +10,87 @@ load_dotenv()
 
 logger = logging.getLogger("WeatherApp.DB")
 
+# Environment Variables for Database Configuration
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = int(os.getenv("DB_PORT", 3306))
-DB_USER = os.getenv("DB_USER", "weather_user")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "weather_secret_123")
-DB_NAME = os.getenv("DB_NAME", "weather_db")
+try:
+    DB_PORT = int(os.getenv("DB_PORT", "3306") or 3306)
+except ValueError:
+    DB_PORT = 3306
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "smart_weather_db")
+DB_SSL_CA = os.getenv("DB_SSL_CA", "").strip()
 ENABLE_FALLBACK = os.getenv("ENABLE_DB_FALLBACK", "true").lower() in ("true", "1", "yes")
 
 _db_mode = None  # 'mysql' or 'sqlite'
 SQLITE_PATH = os.path.join(os.path.dirname(__file__), "weather_data.db")
 
 
+def get_mysql_ssl_config():
+    """
+    Build SSL config dictionary for PyMySQL if CA certificate is configured.
+    Supports TiDB Cloud and secure MySQL connections.
+    """
+    if DB_SSL_CA:
+        if os.path.exists(DB_SSL_CA):
+            return {"ca": DB_SSL_CA}
+        else:
+            logger.warning(f"Configured DB_SSL_CA path not found on filesystem: {DB_SSL_CA}")
+            return {"ca": DB_SSL_CA}
+
+    # Auto-detect standard Linux CA bundle if connecting to remote host on Render / cloud Linux
+    if os.path.exists("/etc/ssl/certs/ca-certificates.crt") and DB_HOST not in ("127.0.0.1", "localhost", ""):
+        return {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+
+    return None
+
+
+def get_mysql_connection(cursorclass=None, autocommit=True):
+    """
+    Create a secure PyMySQL connection using environment configuration.
+    Applies SSL certificate if configured or in cloud environment.
+    """
+    conn_params = {
+        "host": DB_HOST,
+        "port": DB_PORT,
+        "user": DB_USER,
+        "password": DB_PASSWORD,
+        "database": DB_NAME,
+        "charset": "utf8mb4",
+        "connect_timeout": 10,
+        "autocommit": autocommit
+    }
+    if cursorclass:
+        conn_params["cursorclass"] = cursorclass
+
+    ssl_config = get_mysql_ssl_config()
+    if ssl_config:
+        conn_params["ssl"] = ssl_config
+
+    return pymysql.connect(**conn_params)
+
+
 def determine_database():
-    """Detect whether MySQL is accessible. If not, use SQLite fallback if enabled."""
+    """
+    Detect whether MySQL / TiDB Cloud is accessible.
+    If connection fails and ENABLE_DB_FALLBACK is enabled, fall back to SQLite for local development.
+    If ENABLE_DB_FALLBACK is false (e.g. on Render), raise the exception immediately.
+    """
     global _db_mode
     try:
-        conn = pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            charset="utf8mb4",
-            connect_timeout=3
-        )
+        conn = get_mysql_connection()
         conn.close()
         _db_mode = "mysql"
-        logger.info(f"Connected successfully to MySQL at {DB_HOST}:{DB_PORT}")
+        logger.info(f"Connected successfully to MySQL/TiDB at {DB_HOST}:{DB_PORT}/{DB_NAME}")
         return "mysql"
     except Exception as e:
         if ENABLE_FALLBACK:
             _db_mode = "sqlite"
-            logger.warning(f"MySQL unavailable ({e}). Falling back to local SQLite: {SQLITE_PATH}")
+            logger.warning(f"MySQL/TiDB unavailable ({e}). Falling back to local SQLite: {SQLITE_PATH}")
             return "sqlite"
         else:
             _db_mode = "mysql"
-            logger.error(f"Failed to connect to MySQL: {e}")
+            logger.error(f"Failed to connect to MySQL/TiDB at {DB_HOST}:{DB_PORT}/{DB_NAME} ({e}) - DB fallback is disabled.")
             raise e
 
 
@@ -59,16 +105,7 @@ def get_connection():
     """Get active database connection based on mode."""
     mode = get_db_mode()
     if mode == "mysql":
-        return pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            charset="utf8mb4",
-            cursorclass=DictCursor,
-            autocommit=True
-        )
+        return get_mysql_connection(cursorclass=DictCursor, autocommit=True)
     else:
         conn = sqlite3.connect(SQLITE_PATH)
         conn.row_factory = sqlite3.Row
@@ -76,23 +113,15 @@ def get_connection():
 
 
 def init_db():
-    """Initialize database tables and initial seed configuration."""
+    """
+    Initialize database tables and initial seed configuration.
+    Creates tables directly in the selected database (smart_weather_db / DB_NAME).
+    Does NOT attempt to create or modify other databases, ensuring compatibility with TiDB Cloud.
+    """
     mode = get_db_mode()
-    
-    if mode == "mysql":
-        # Create database if not exists
-        conn = pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            charset="utf8mb4"
-        )
-        with conn.cursor() as cur:
-            cur.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME};")
-        conn.close()
 
-        # Connect to database and create tables
+    if mode == "mysql":
+        # Connect directly to target database
         conn = get_connection()
         with conn.cursor() as cur:
             cur.execute("""
@@ -132,6 +161,14 @@ def init_db():
                     cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_status VARCHAR(50) DEFAULT 'No Rain' AFTER rain_detected;")
             except Exception as mig_e:
                 logger.warning(f"MySQL migration rain_status notice: {mig_e}")
+
+            # Migration: Ensure rain_level column exists in MySQL table
+            try:
+                cur.execute("SHOW COLUMNS FROM sensor_readings LIKE 'rain_level';")
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_level VARCHAR(30) DEFAULT 'No Rain' AFTER rain_status;")
+            except Exception as mig_e:
+                logger.warning(f"MySQL migration rain_level notice: {mig_e}")
 
             cur.execute("""
             CREATE TABLE IF NOT EXISTS alert_thresholds (
@@ -246,15 +283,18 @@ def init_db():
         """)
         conn.commit()
 
-        # Migration: Ensure rain_status column exists in SQLite table
+        # Migration: Ensure rain_status and rain_level columns exist in SQLite table
         try:
             cur.execute("PRAGMA table_info(sensor_readings);")
             cols = [col[1] for col in cur.fetchall()]
             if "rain_status" not in cols:
                 cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_status TEXT DEFAULT 'No Rain';")
                 conn.commit()
+            if "rain_level" not in cols:
+                cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_level TEXT DEFAULT 'No Rain';")
+                conn.commit()
         except Exception as mig_e:
-            logger.warning(f"SQLite migration rain_status notice: {mig_e}")
+            logger.warning(f"SQLite migration notice: {mig_e}")
 
         conn.close()
 

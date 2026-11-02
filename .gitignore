@@ -1,5 +1,14 @@
 # Environment variables & local credentials
 .env
+.env.local
+.env.*.local
+
+# SSL certificates and private keys
+*.pem
+*.crt
+*.key
+cacert.pem
+isrgrootx1.pem
 
 # Python bytecode & cache
 __pycache__/
