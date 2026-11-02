@@ -1,0 +1,57 @@
+services:
+  # 1. MySQL Relational Database Container
+  db:
+    image: mysql:8.0
+    container_name: agriweather_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_secret_123}
+      MYSQL_DATABASE: ${DB_NAME:-weather_db}
+      MYSQL_USER: ${DB_USER:-weather_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-weather_secret_123}
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-root_secret_123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - weather_net
+
+  # 2. Python Flask REST API & Web Dashboard Container
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: agriweather_backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-weather_db}
+      DB_USER: ${DB_USER:-weather_user}
+      DB_PASSWORD: ${DB_PASSWORD:-weather_secret_123}
+      BACKEND_PORT: 5000
+      API_KEY: ${API_KEY:-WEATHER_FARM_KEY_2026}
+      ENABLE_DB_FALLBACK: "false"
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - weather_net
+
+volumes:
+  db_data:
+    name: agriweather_mysql_data
+
+networks:
+  weather_net:
+    name: agriweather_network
+    driver: bridge
