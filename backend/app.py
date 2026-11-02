@@ -39,17 +39,33 @@ DEVICE_OFFLINE_THRESHOLD_SECONDS = 60  # Marked offline if no data for 60 second
 
 def classify_rain_level(rain_value, rain_detected):
     """
-    Classify rainfall intensity.
-    rain_value is normalized percentage (0 - 100%) or raw.
+    Classify rainfall level:
+    - No Rain
+    - Light Rain (Low)
+    - Medium Rain (Moderate / Medium)
+    - Heavy Rain (High / Heavy)
     """
-    if not rain_detected or rain_value < 10:
+    if not rain_detected:
         return "No Rain"
-    elif rain_value < 35:
-        return "Light Drizzle"
-    elif rain_value < 70:
-        return "Moderate Rain"
+    
+    try:
+        val = float(rain_value or 0)
+    except (ValueError, TypeError):
+        val = 0.0
+
+    # If raw ADC > 100 on ESP32 (0-4095)
+    if val > 100:
+        val = max(0, min(100, int((4095 - val) / 4095 * 100)))
+
+    if val > 70:
+        return "Heavy Rain"
+    elif val >= 30:
+        return "Medium Rain"
+    elif val > 1:
+        return "Light Rain"
     else:
-        return "Heavy Downpour"
+        # Digital rain sensor pin LOW (0): water actively detected on plate
+        return "Heavy Rain"
 
 
 def evaluate_threshold_alerts(reading):
@@ -65,7 +81,8 @@ def evaluate_threshold_alerts(reading):
     
     temp = float(reading["temperature"])
     hum = float(reading["humidity"])
-    rain = float(reading["rain_value"])
+    rain = float(reading.get("rain_value", 0))
+    rain_detected = bool(reading.get("rain_detected", False))
     
     alerts_to_check = []
     
@@ -113,18 +130,16 @@ def evaluate_threshold_alerts(reading):
                 "threshold_value": float(h_rule["min_value"])
             })
 
-    # 3. Rain checks
-    r_rule = th_dict.get("rain")
-    if r_rule and reading["rain_detected"]:
-        if r_rule.get("max_value") is not None and rain >= float(r_rule["max_value"]):
-            alerts_to_check.append({
-                "alert_type": "HEAVY_RAIN",
-                "severity": "DANGER",
-                "message": f"Heavy Rainfall Warning: Rain intensity is {rain:.0f}% (Exceeds threshold of {r_rule['max_value']}%).",
-                "agricultural_advice": "Torrential rain detected. Stop all scheduled irrigation. Clear field runoff drainage ditches to prevent root suffocation and waterlogging.",
-                "sensor_value": rain,
-                "threshold_value": float(r_rule["max_value"])
-            })
+    # 3. Rain checks: Trigger alert whenever water is detected on the sensor plate
+    if rain_detected:
+        alerts_to_check.append({
+            "alert_type": "RAIN_DETECTED",
+            "severity": "WARNING",
+            "message": "Rainfall detected on the field sensor plate.",
+            "agricultural_advice": "Active rainfall detected on the field sensor. Suspend scheduled irrigation to conserve water and prevent soil saturation.",
+            "sensor_value": rain,
+            "threshold_value": 0.0
+        })
 
     # Deduplicate against recent alerts (last 10 minutes)
     for alert in alerts_to_check:
@@ -225,26 +240,64 @@ def receive_sensor_data():
         temperature = float(req_data.get("temperature"))
         humidity = float(req_data.get("humidity"))
         raw_rain = float(req_data.get("rain_value", 0))
-        rain_detected = bool(req_data.get("rain_detected", False))
-        rain_status_input = req_data.get("rain_status")
-        if rain_status_input:
-            if "rain" in str(rain_status_input).lower() and "no" not in str(rain_status_input).lower():
-                rain_detected = True
     except (TypeError, ValueError) as e:
         return jsonify({
             "status": "error", 
             "message": f"Malformed sensor reading values: {str(e)}"
         }), 422
 
-    # Normalize rain value to percentage if reading raw ESP32 ADC (0-4095)
-    # On ESP32 ADC: dry is ~4095, saturated rain is ~0.
-    # If the user sends raw ADC > 100, normalize it:
-    if raw_rain > 100:
-        normalized_rain = max(0, min(100, int((4095 - raw_rain) / 4095 * 100)))
-        if normalized_rain > 10:
-            rain_detected = True
+    # Robust rain detection logic:
+    # 1. Inspect explicit rain_detected parameter (boolean, number, or string)
+    is_rain = False
+    rd_raw = req_data.get("rain_detected")
+    if rd_raw is not None:
+        if isinstance(rd_raw, bool):
+            is_rain = rd_raw
+        elif isinstance(rd_raw, (int, float)):
+            is_rain = bool(rd_raw == 1)
+        elif isinstance(rd_raw, str):
+            is_rain = rd_raw.strip().lower() in ("true", "1", "yes")
+
+    # 2. Inspect rain_status text parameter ("Heavy Rain", "Medium Rain", "Light Rain", "Water Detected", "No Rain")
+    rs_raw = req_data.get("rain_status")
+    rain_level = None
+    if rs_raw:
+        status_clean = str(rs_raw).strip().lower()
+        if "no water" in status_clean or "no rain" in status_clean or "no_rain" in status_clean or "dry" in status_clean:
+            is_rain = False
+            rain_level = "No Rain"
+        elif "heavy" in status_clean or "high" in status_clean:
+            is_rain = True
+            rain_level = "Heavy Rain"
+        elif "medium" in status_clean or "moderate" in status_clean:
+            is_rain = True
+            rain_level = "Medium Rain"
+        elif "light" in status_clean or "low" in status_clean:
+            is_rain = True
+            rain_level = "Light Rain"
+        elif "water" in status_clean or "rain" in status_clean:
+            is_rain = True
+
+    # 3. Fallback for ESP32 active-LOW digital rain sensor (0 = LOW = water detected, 1 = HIGH = dry)
+    if rd_raw is None and rs_raw is None:
+        if raw_rain == 0:
+            is_rain = True
+        elif raw_rain == 1:
+            is_rain = False
+        elif raw_rain > 100:
+            # ADC reading where lower values indicate moisture
+            is_rain = raw_rain < 3500
+
+    rain_detected = is_rain
+    if not is_rain:
+        rain_status = str(rs_raw) if rs_raw else "No Rain"
+        rain_level = "No Rain"
     else:
-        normalized_rain = int(max(0, min(100, raw_rain)))
+        if not rain_level:
+            rain_level = classify_rain_level(raw_rain, is_rain)
+        rain_status = str(rs_raw) if rs_raw else rain_level
+
+    stored_rain_value = int(raw_rain)
 
     # Physical boundary validation
     if not (-20.0 <= temperature <= 75.0):
@@ -252,10 +305,6 @@ def receive_sensor_data():
     if not (0.0 <= humidity <= 100.0):
         return jsonify({"status": "error", "message": "Humidity reading out of bounds (0 to 100%)"}), 422
 
-    if rain_status_input:
-        rain_level = str(rain_status_input)
-    else:
-        rain_level = classify_rain_level(normalized_rain, rain_detected)
     client_ip = request.remote_addr
 
     # Store reading
@@ -263,10 +312,14 @@ def receive_sensor_data():
     reading_id = database.execute_commit(
         """
         INSERT INTO sensor_readings 
-        (device_id, temperature, humidity, rain_value, rain_detected, rain_level, recorded_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s);
+        (device_id, temperature, humidity, rain_value, rain_detected, rain_status, rain_level, recorded_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        """ if database.get_db_mode() == "mysql" else """
+        INSERT INTO sensor_readings 
+        (device_id, temperature, humidity, rain_value, rain_detected, rain_status, rain_level, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """,
-        (device_id, temperature, humidity, normalized_rain, 1 if rain_detected else 0, rain_level, now_str)
+        (device_id, temperature, humidity, stored_rain_value, 1 if rain_detected else 0, rain_status, rain_level, now_str)
     )
 
     # Update or insert device status
@@ -294,23 +347,26 @@ def receive_sensor_data():
         "device_id": device_id,
         "temperature": temperature,
         "humidity": humidity,
-        "rain_value": normalized_rain,
+        "rain_value": stored_rain_value,
         "rain_detected": rain_detected
     }
     alerts_triggered = evaluate_threshold_alerts(reading_record)
 
-    logger.info(f"Recorded Reading #{reading_id} from [{device_id}]: Temp={temperature}°C, Hum={humidity}%, Rain={normalized_rain}% ({rain_level})")
+    logger.info(f"Recorded Reading #{reading_id} from [{device_id}]: Temp={temperature}°C, Hum={humidity}%, Rain={rain_status} (raw={stored_rain_value})")
 
     return jsonify({
         "status": "success",
         "message": "Sensor reading recorded successfully",
         "reading_id": reading_id,
         "data": {
+            "device_id": device_id,
             "temperature": temperature,
             "humidity": humidity,
-            "rain_value": normalized_rain,
+            "rain_value": stored_rain_value,
             "rain_detected": rain_detected,
-            "rain_level": rain_level
+            "rain_status": rain_status,
+            "rain_level": rain_level,
+            "recorded_at": now_str
         },
         "alerts_triggered": alerts_triggered
     }), 201
@@ -321,7 +377,7 @@ def get_latest_sensor_data():
     """Return the most recent sensor reading and current system advisory."""
     reading = database.query_one(
         """
-        SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_level, recorded_at
+        SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_status, rain_level, recorded_at
         FROM sensor_readings
         ORDER BY id DESC
         LIMIT 1;
@@ -359,12 +415,38 @@ def get_latest_sensor_data():
     # Agricultural advisory algorithm based on current weather conditions
     advisory = "Normal field conditions. Continue standard agricultural practices."
     if reading:
+        if isinstance(reading.get("recorded_at"), datetime):
+            reading["recorded_at"] = reading["recorded_at"].strftime("%Y-%m-%d %H:%M:%S")
+
         temp = float(reading["temperature"])
         hum = float(reading["humidity"])
-        rain_detected = bool(reading["rain_detected"])
+
+        # Determine rain detection status cleanly
+        raw_det = reading.get("rain_detected")
+        is_det = False
+        if raw_det is True or raw_det == 1 or str(raw_det).lower() in ("true", "1"):
+            is_det = True
+        elif reading.get("rain_status"):
+            st = str(reading.get("rain_status")).lower()
+            if "no water" in st or "no rain" in st or "no_rain" in st or "dry" in st:
+                is_det = False
+            elif "water" in st or "rain" in st or "heavy" in st or "medium" in st or "light" in st:
+                is_det = True
+        elif reading.get("rain_value") == 0 and raw_det is None:
+            is_det = True
+
+        reading["rain_detected"] = is_det
+        curr_status = reading.get("rain_status") or reading.get("rain_level")
+        if not is_det:
+            reading["rain_status"] = str(curr_status) if curr_status else "No Rain"
+            reading["rain_level"] = "No Rain"
+        else:
+            lvl = classify_rain_level(reading.get("rain_value"), is_det)
+            reading["rain_level"] = lvl
+            reading["rain_status"] = str(curr_status) if curr_status else lvl
         
-        if rain_detected:
-            advisory = "Rainfall in progress. Pause scheduled irrigation systems to conserve water and prevent soil saturation."
+        if is_det:
+            advisory = f"{reading['rain_status']} in progress. Pause scheduled irrigation systems to conserve water."
         elif temp > 33.0:
             advisory = "High heat conditions. Irrigate during early morning or evening hours to minimize evaporation losses."
         elif temp < 12.0:
@@ -405,7 +487,7 @@ def get_sensor_history():
     default_limit = 100 if time_range else 50
     limit = min(int(raw_limit) if raw_limit else default_limit, 2000)
 
-    query = "SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_level, recorded_at FROM sensor_readings"
+    query = "SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_status, rain_level, recorded_at FROM sensor_readings"
     params = []
     conditions = []
 
@@ -446,6 +528,33 @@ def get_sensor_history():
 
     readings = database.query_all(query, tuple(params))
     
+    # Format fields
+    for r in readings:
+        if isinstance(r.get("recorded_at"), datetime):
+            r["recorded_at"] = r["recorded_at"].strftime("%Y-%m-%d %H:%M:%S")
+        raw_det = r.get("rain_detected")
+        is_det = False
+        if raw_det is True or raw_det == 1 or str(raw_det).lower() in ("true", "1"):
+            is_det = True
+        elif r.get("rain_status"):
+            st = str(r.get("rain_status")).lower()
+            if "no water" in st or "no rain" in st or "no_rain" in st:
+                is_det = False
+            elif "water" in st or "rain" in st:
+                is_det = True
+        elif r.get("rain_value") == 0 and raw_det is None:
+            is_det = True
+
+        r["rain_detected"] = is_det
+        curr_status = r.get("rain_status") or r.get("rain_level")
+        if not is_det:
+            r["rain_status"] = str(curr_status) if curr_status else "No Rain"
+            r["rain_level"] = "No Rain"
+        else:
+            lvl = classify_rain_level(r.get("rain_value"), is_det)
+            r["rain_level"] = lvl
+            r["rain_status"] = str(curr_status) if curr_status else lvl
+
     # Return chronologically ascending for charts
     readings.reverse()
 
@@ -643,12 +752,12 @@ def simulate_sensor_data():
 def export_csv():
     """Export historical sensor readings as downloadable CSV file."""
     readings = database.query_all(
-        "SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_level, recorded_at FROM sensor_readings ORDER BY id DESC LIMIT 1000;"
+        "SELECT id, device_id, temperature, humidity, rain_value, rain_detected, rain_status, rain_level, recorded_at FROM sensor_readings ORDER BY id DESC LIMIT 1000;"
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["ID", "Device ID", "Temperature (°C)", "Humidity (%)", "Rain Intensity (%)", "Rain Detected", "Rain Category", "Timestamp"])
+    writer.writerow(["ID", "Device ID", "Temperature (°C)", "Humidity (%)", "Rain Sensor Value", "Rain Detected", "Rain Status", "Timestamp"])
 
     for r in readings:
         writer.writerow([
@@ -657,8 +766,8 @@ def export_csv():
             r["temperature"],
             r["humidity"],
             r["rain_value"],
-            "YES" if r["rain_detected"] else "NO",
-            r["rain_level"],
+            "YES" if r.get("rain_detected") else "NO",
+            r.get("rain_status") or r.get("rain_level") or ("Rain Detected" if r.get("rain_detected") else "No Rain"),
             r["recorded_at"]
         ])
 

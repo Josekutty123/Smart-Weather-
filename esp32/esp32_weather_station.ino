@@ -4,27 +4,21 @@
  * MCA Academic Project - Arduino IDE Firmware
  * =====================================================================================
  * 
- * Target Board: ESP32 Dev Module / ESP32 WROOM-32
- * Sensors:
- *   1. DHT11: Temperature and Humidity Sensor (Connected to GPIO 4)
- *   2. Rain Sensor Module FC-37 / YL-83 with LM393 Comparator Board:
- *      - Analog Output (AO) -> GPIO 34 (ADC1 channel, safe with active Wi-Fi)
- *      - Digital Output (DO) -> GPIO 18
+ * Hardware Connections:
+ *   1. DHT11 Sensor:
+ *      - VCC -> 3.3V (or 5V)
+ *      - GND -> GND
+ *      - Data -> GPIO 4
+ * 
+ *   2. Rain Sensor Module (FC-37 Rain Board + LM393 Comparator):
+ *      - VCC -> 3.3V (or 5V)
+ *      - GND -> GND
+ *      - DO (Digital Output) -> GPIO 0
  * 
  * Required Libraries (Install via Arduino Library Manager):
- *   - "DHT sensor library" by Adafruit (v1.4.x)
+ *   - "DHT sensor library" by Adafruit
  *   - "Adafruit Unified Sensor" by Adafruit
  *   - Built-in ESP32 libraries: WiFi.h, HTTPClient.h
- * 
- * IMPORTANT NETWORK SETUP FOR STUDENTS / EVALUATORS:
- * 1. Both your ESP32 and your computer/server running the Python backend MUST be 
- *    connected to the SAME local Wi-Fi network (or mobile hotspot).
- * 2. Find your laptop's local IPv4 address:
- *    - On Windows: Open Command Prompt, run `ipconfig`, look for "IPv4 Address"
- *      (e.g., 192.168.1.15 or 192.168.43.100).
- * 3. Update 'BACKEND_SERVER_IP' below with that IP address.
- * 4. Connecting the USB cable to your laptop powers the ESP32 and gives you Serial 
- *    output, but sensor data travels over Wi-Fi network packets to the backend!
  * =====================================================================================
  */
 
@@ -33,18 +27,16 @@
 #include <DHT.h>
 
 // -------------------------------------------------------------
-// 1. Wi-Fi Configuration (Replace with your Wi-Fi or Hotspot)
+// 1. Wi-Fi Configuration
 // -------------------------------------------------------------
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";         // e.g., "Home_WiFi" or "Phone_Hotspot"
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";     // e.g., "12345678"
+const char* WIFI_SSID     = "YOUR_WIFI_SSID";         // Replace with your Wi-Fi SSID
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";     // Replace with your Wi-Fi Password
 
 // -------------------------------------------------------------
 // 2. Backend Server Configuration
 // -------------------------------------------------------------
-// DO NOT use "localhost" or "127.0.0.1" here because "localhost" from the ESP32's
-// perspective would mean the ESP32 itself! Use your PC's LAN IP address.
-// Automatically detected active Wi-Fi IP of your laptop: 192.168.43.250
-const char* BACKEND_SERVER_IP = "192.168.43.250";     // Automatically detected LAN IP
+// Update with your laptop's local LAN IP address
+const char* BACKEND_SERVER_IP = "192.168.43.250";
 const int   BACKEND_PORT      = 5000;
 const char* API_ENDPOINT      = "/api/sensor-data";
 const char* API_KEY           = "WEATHER_FARM_KEY_2026";
@@ -53,16 +45,14 @@ const char* DEVICE_ID         = "ESP32_FARM_01";
 // -------------------------------------------------------------
 // 3. Hardware Pin Definitions
 // -------------------------------------------------------------
-#define DHTPIN        4       // GPIO 4 connected to DHT11 Data pin
-#define DHTTYPE       DHT11   // DHT 11 sensor model
+#define DHTPIN            4   // GPIO 4 connected to DHT11 Data pin
+#define DHTTYPE           DHT11
 
-#define RAIN_ANALOG_PIN   34  // GPIO 34 (ADC1_CH6) connected to Rain Module AO
-#define RAIN_DIGITAL_PIN  18  // GPIO 18 connected to Rain Module DO
+#define RAIN_DIGITAL_PIN  0   // GPIO 0 connected to Rain Sensor Digital Output (DO)
+#define STATUS_LED_PIN    2   // Onboard Blue LED on ESP32
 
-#define STATUS_LED_PIN    2   // Onboard Blue LED on ESP32 (GPIO 2)
-
-// Transmission Interval (Milliseconds)
-const unsigned long SEND_INTERVAL_MS = 6000; // Send telemetry every 6 seconds
+// Transmission Interval: Telemetry sent every 4 seconds
+const unsigned long SEND_INTERVAL_MS = 4000;
 unsigned long lastSendTime = 0;
 
 // Initialize DHT Sensor
@@ -74,72 +64,46 @@ DHT dht(DHTPIN, DHTTYPE);
 void connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
-  Serial.println();
-  Serial.print("[WiFi] Connecting to SSID: ");
-  Serial.println(WIFI_SSID);
-
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 25) {
     delay(500);
-    Serial.print(".");
     digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN)); // Blink LED while connecting
     attempts++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     digitalWrite(STATUS_LED_PIN, HIGH); // Solid ON when connected
-    Serial.println();
-    Serial.println("[WiFi] Successfully connected!");
-    Serial.print("[WiFi] ESP32 Assigned IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("[WiFi] Signal Strength (RSSI): ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
   } else {
     digitalWrite(STATUS_LED_PIN, LOW);
-    Serial.println();
-    Serial.println("[WiFi] Connection failed. Will retry in next loop cycle.");
   }
 }
 
 // -------------------------------------------------------------
-// Arduino Setup Function
+// Setup Function
 // -------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println("\n=======================================================");
-  Serial.println(" Smart Weather Alert System for Farmers - ESP32 Node");
-  Serial.println(" MCA Academic Project • IoT & Cloud Telemetry");
-  Serial.println("=======================================================");
-
   pinMode(STATUS_LED_PIN, OUTPUT);
-  pinMode(RAIN_ANALOG_PIN, INPUT);
-  pinMode(RAIN_DIGITAL_PIN, INPUT_PULLUP);
+  pinMode(RAIN_DIGITAL_PIN, INPUT_PULLUP); // Rain sensor digital pin
 
-  // Initialize DHT11 sensor
   dht.begin();
-  Serial.println("[Sensors] DHT11 initialized on GPIO 4");
-  Serial.println("[Sensors] Rain sensor initialized on GPIO 34 (Analog) & GPIO 18 (Digital)");
-
-  // Connect to Local Wi-Fi
   connectToWiFi();
 }
 
 // -------------------------------------------------------------
-// Main Arduino Loop Function
+// Main Loop Function
 // -------------------------------------------------------------
 void loop() {
-  // Reconnect Wi-Fi if connection was lost
+  // Maintain Wi-Fi Connection
   if (WiFi.status() != WL_CONNECTED) {
     connectToWiFi();
   }
 
-  // Periodic sensor sampling and transmission
   unsigned long currentMillis = millis();
   if (currentMillis - lastSendTime >= SEND_INTERVAL_MS) {
     lastSendTime = currentMillis;
@@ -148,37 +112,32 @@ void loop() {
     float humidity = dht.readHumidity();
     float temperature = dht.readTemperature(); // Celsius
 
-    // Check for sensor read failure
     if (isnan(humidity) || isnan(temperature)) {
-      Serial.println("[ERROR] Failed to read from DHT11 sensor! Check wiring.");
+      Serial.println("[ERROR] Failed to read from DHT11 sensor! Check wiring on GPIO 4.");
       return;
     }
 
-    // 2. Read Rain Sensor
-    // Raw ADC reading on ESP32 is 12-bit (0 - 4095).
-    // Dry sensor: ~3500 - 4095
-    // Saturated/heavy rain: ~0 - 1000
-    int rawRainValue = analogRead(RAIN_ANALOG_PIN);
-    int rainDigital = digitalRead(RAIN_DIGITAL_PIN); // LM393 DO is Active LOW (0 = rain, 1 = dry)
+    // 2. Read Digital Rain Sensor (Active-LOW: 0 = Water Detected, 1 = No Water Detected)
+    int rainDigital = digitalRead(RAIN_DIGITAL_PIN);
+    bool isWaterDetected = (rainDigital == LOW);
+    const char* rainStatus = isWaterDetected ? "Water Detected" : "No Water Detected";
 
-    // Calculate Rain Intensity Percentage (0% = Bone dry, 100% = Maximum deluge)
-    int rainIntensityPercent = map(rawRainValue, 4095, 0, 0, 100);
-    if (rainIntensityPercent < 0) rainIntensityPercent = 0;
-    if (rainIntensityPercent > 100) rainIntensityPercent = 100;
+    // 3. Simplified Serial Monitor Output
+    Serial.println();
+    Serial.println("SMART WEATHER MONITORING");
+    Serial.println();
+    Serial.print("Temperature: ");
+    Serial.print((int)round(temperature));
+    Serial.println(" °C");
+    Serial.print("Humidity: ");
+    Serial.print((int)round(humidity));
+    Serial.println(" %");
+    Serial.print("Rain Status: ");
+    Serial.println(rainStatus);
 
-    bool isRaining = (rainDigital == LOW) || (rainIntensityPercent > 15);
-
-    // Print values to Serial Monitor for student debugging
-    Serial.println("\n-------------------------------------------------------");
-    Serial.printf("[Telemetry] Temp: %.1f °C | Humidity: %.1f %%\n", temperature, humidity);
-    Serial.printf("[Telemetry] Rain Raw ADC: %d | Rain Intensity: %d %% | Status: %s\n",
-                  rawRainValue, rainIntensityPercent, isRaining ? "RAIN DETECTED" : "NO RAIN");
-
-    // 3. Transmit telemetry via HTTP POST to Python Backend
+    // 4. Transmit Telemetry to Flask API via HTTP POST
     if (WiFi.status() == WL_CONNECTED) {
-      transmitSensorData(temperature, humidity, rainIntensityPercent, isRaining);
-    } else {
-      Serial.println("[WiFi] Cannot transmit data: Not connected to Wi-Fi");
+      transmitSensorData(temperature, humidity, isWaterDetected, rainStatus);
     }
   }
 }
@@ -186,13 +145,10 @@ void loop() {
 // -------------------------------------------------------------
 // Function to Send JSON Payload to Backend REST API
 // -------------------------------------------------------------
-void transmitSensorData(float temp, float hum, int rainIntensity, bool isRaining) {
+void transmitSensorData(float temp, float hum, bool isWaterDetected, const char* rainStatus) {
   HTTPClient http;
 
-  // Build full server URL
   String serverUrl = String("http://") + BACKEND_SERVER_IP + ":" + String(BACKEND_PORT) + API_ENDPOINT;
-  Serial.print("[HTTP] Sending POST request to: ");
-  Serial.println(serverUrl);
 
   http.begin(serverUrl);
   http.addHeader("Content-Type", "application/json");
@@ -202,33 +158,22 @@ void transmitSensorData(float temp, float hum, int rainIntensity, bool isRaining
   // Construct JSON body
   char jsonBuffer[256];
   snprintf(jsonBuffer, sizeof(jsonBuffer),
-           "{\"device_id\":\"%s\",\"temperature\":%.2f,\"humidity\":%.2f,\"rain_value\":%d,\"rain_detected\":%s,\"api_key\":\"%s\"}",
+           "{\"device_id\":\"%s\",\"temperature\":%.1f,\"humidity\":%.1f,\"rain_status\":\"%s\",\"rain_detected\":%s,\"rain_value\":%d,\"api_key\":\"%s\"}",
            DEVICE_ID,
            temp,
            hum,
-           rainIntensity,
-           isRaining ? "true" : "false",
+           rainStatus,
+           isWaterDetected ? "true" : "false",
+           isWaterDetected ? 0 : 1,
            API_KEY);
 
-  Serial.print("[HTTP] Payload: ");
-  Serial.println(jsonBuffer);
-
-  // Send POST request
   int httpResponseCode = http.POST(jsonBuffer);
 
   if (httpResponseCode > 0) {
-    String response = http.getString();
-    Serial.printf("[HTTP] Server Response Code: %d\n", httpResponseCode);
-    Serial.print("[HTTP] Response Body: ");
-    Serial.println(response);
-
-    // Blink onboard LED to indicate successful transmission
+    // Quick blink to indicate successful transmission
     digitalWrite(STATUS_LED_PIN, LOW);
-    delay(100);
+    delay(80);
     digitalWrite(STATUS_LED_PIN, HIGH);
-  } else {
-    Serial.printf("[HTTP] POST failed. Error: %s\n", http.errorToString(httpResponseCode).c_str());
-    Serial.println("[HINT] Ensure backend server is running and laptop firewall is not blocking port 5000.");
   }
 
   http.end(); // Free network resources

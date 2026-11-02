@@ -117,12 +117,21 @@ def init_db():
                 humidity DECIMAL(5, 2) NOT NULL,
                 rain_value INT NOT NULL,
                 rain_detected TINYINT(1) NOT NULL DEFAULT 0,
+                rain_status VARCHAR(50) DEFAULT 'No Rain',
                 rain_level VARCHAR(30) DEFAULT 'No Rain',
                 recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_recorded_at (recorded_at),
                 INDEX idx_device_id (device_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """)
+
+            # Migration: Ensure rain_status column exists in MySQL table
+            try:
+                cur.execute("SHOW COLUMNS FROM sensor_readings LIKE 'rain_status';")
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_status VARCHAR(50) DEFAULT 'No Rain' AFTER rain_detected;")
+            except Exception as mig_e:
+                logger.warning(f"MySQL migration rain_status notice: {mig_e}")
 
             cur.execute("""
             CREATE TABLE IF NOT EXISTS alert_thresholds (
@@ -197,6 +206,7 @@ def init_db():
             humidity REAL NOT NULL,
             rain_value INTEGER NOT NULL,
             rain_detected INTEGER NOT NULL DEFAULT 0,
+            rain_status TEXT DEFAULT 'No Rain',
             rain_level TEXT DEFAULT 'No Rain',
             recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -235,6 +245,17 @@ def init_db():
             ('rain', 'Rainfall Threshold', '%', NULL, 60.00, 'Alert when rainfall intensity exceeds 60% (heavy downpour).');
         """)
         conn.commit()
+
+        # Migration: Ensure rain_status column exists in SQLite table
+        try:
+            cur.execute("PRAGMA table_info(sensor_readings);")
+            cols = [col[1] for col in cur.fetchall()]
+            if "rain_status" not in cols:
+                cur.execute("ALTER TABLE sensor_readings ADD COLUMN rain_status TEXT DEFAULT 'No Rain';")
+                conn.commit()
+        except Exception as mig_e:
+            logger.warning(f"SQLite migration rain_status notice: {mig_e}")
+
         conn.close()
 
 

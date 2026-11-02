@@ -150,8 +150,7 @@ function initCharts() {
                     callbacks: {
                         label: (ctx) => {
                             const isRain = ctx.parsed.y === 1;
-                            const raw = ctx.raw && ctx.raw.rawValue !== undefined ? ` (Raw ADC: ${ctx.raw.rawValue})` : '';
-                            return ` Status: ${isRain ? 'RAIN DETECTED' : 'NO RAIN'}${raw}`;
+                            return ` Rainfall: ${isRain ? 'Rain Detected' : 'No Rain'}`;
                         }
                     }
                 }
@@ -166,7 +165,7 @@ function initCharts() {
                     max: 1,
                     ticks: {
                         stepSize: 1,
-                        callback: (val) => val === 1 ? 'RAIN DETECTED' : 'NO RAIN',
+                        callback: (val) => val === 1 ? 'Rain' : 'No Rain',
                         font: { size: 10, weight: '600' },
                         color: (ctx) => ctx.tick.value === 1 ? '#0891b2' : '#64748b'
                     },
@@ -225,12 +224,23 @@ function updateAllCharts(readings) {
     const temps = readings.map(r => parseFloat(r.temperature));
     const hums = readings.map(r => parseFloat(r.humidity));
     
-    // Binary rain detection: 1 for rain detected, 0 for dry
-    const rainData = readings.map(r => ({
-        x: formatChartLabel(r.recorded_at),
-        y: r.rain_detected ? 1 : 0,
-        rawValue: r.rain_value !== undefined ? r.rain_value : '--'
-    }));
+    // Binary rain detection: 1 for Water Detected, 0 for No Water Detected
+    const rainData = readings.map(r => {
+        let isRain = false;
+        if (r.rain_detected === true || r.rain_detected === 1 || r.rain_detected === '1' || r.rain_detected === 'true') {
+            isRain = true;
+        } else if (r.rain_status && typeof r.rain_status === 'string') {
+            const s = r.rain_status.toLowerCase();
+            if (s.includes('no water') || s.includes('no rain') || s.includes('no_rain')) isRain = false;
+            else if (s.includes('water') || s.includes('rain')) isRain = true;
+        } else if (r.rain_value === 0) {
+            isRain = true;
+        }
+        return {
+            x: formatChartLabel(r.recorded_at),
+            y: isRain ? 1 : 0
+        };
+    });
 
     // Update Temperature Chart
     tempChartInstance.data.labels = labels;

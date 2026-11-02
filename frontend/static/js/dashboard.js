@@ -19,6 +19,7 @@ const WEATHER_THRESHOLDS = {
 
 let currentChartRange = '1h'; // Default chart time range: 1 Hour
 let latestTelemetryCache = null;
+let lastProcessedReadingId = 0; // Guard against out-of-order older packets
 
 // ============================================================
 // 2. Helper Functions: Categorization & Status
@@ -59,19 +60,74 @@ function getHumidityCategory(hum) {
 }
 
 /**
- * Determine Rain status based on digital plate sensor
+ * Determine Rain status and category:
+ * - NO RAIN: Badge 'NO RAIN' (bg-secondary)
+ * - LIGHT RAIN: Badge 'LOW' (bg-primary)
+ * - MEDIUM RAIN: Badge 'MEDIUM' (bg-success)
+ * - HEAVY RAIN: Badge 'HIGH' (bg-danger)
  */
 function getRainStatus(reading) {
     if (!reading) {
-        return { label: 'NO DATA', isRain: false, raw: '--' };
+        return { label: '--', category: '--', badgeClass: 'bg-secondary text-white', isRain: false };
     }
-    const isDetected = Boolean(reading.rain_detected);
-    const rawVal = reading.rain_value !== undefined ? reading.rain_value : '--';
     
+    let isDetected = false;
+    const rd = reading.rain_detected;
+    if (rd === true || rd === 1 || rd === '1' || rd === 'true') {
+        isDetected = true;
+    } else if (reading.rain_status && typeof reading.rain_status === 'string') {
+        const s = reading.rain_status.toLowerCase();
+        if (s.includes('no water') || s.includes('no rain') || s.includes('no_rain') || s.includes('dry')) {
+            isDetected = false;
+        } else if (s.includes('water') || s.includes('rain') || s.includes('heavy') || s.includes('medium') || s.includes('light')) {
+            isDetected = true;
+        }
+    } else if (reading.rain_value === 0) {
+        isDetected = true;
+    }
+    
+    if (!isDetected) {
+        return {
+            label: 'No Rain',
+            category: 'NO RAIN',
+            badgeClass: 'bg-secondary text-white',
+            isRain: false
+        };
+    }
+
+    const s = String(reading.rain_status || reading.rain_level || '').toLowerCase();
+    const rawVal = parseFloat(reading.rain_value);
+
+    // Explicit text check
+    if (s.includes('heavy') || s.includes('high')) {
+        return { label: 'Heavy Rain', category: 'HIGH', badgeClass: 'bg-danger text-white', isRain: true };
+    }
+    if (s.includes('medium') || s.includes('moderate')) {
+        return { label: 'Medium Rain', category: 'MEDIUM', badgeClass: 'bg-success text-white', isRain: true };
+    }
+    if (s.includes('light') || s.includes('low')) {
+        return { label: 'Light Rain', category: 'LOW', badgeClass: 'bg-primary text-white', isRain: true };
+    }
+
+    // Intensity percentage check if sent as analog (2-100% or ADC)
+    if (!isNaN(rawVal) && rawVal > 1) {
+        let percent = rawVal;
+        if (rawVal > 100) percent = Math.max(0, Math.min(100, Math.round((4095 - rawVal) / 4095 * 100)));
+        if (percent > 70) {
+            return { label: 'Heavy Rain', category: 'HIGH', badgeClass: 'bg-danger text-white', isRain: true };
+        } else if (percent >= 30) {
+            return { label: 'Medium Rain', category: 'MEDIUM', badgeClass: 'bg-success text-white', isRain: true };
+        } else {
+            return { label: 'Light Rain', category: 'LOW', badgeClass: 'bg-primary text-white', isRain: true };
+        }
+    }
+
+    // Default for digital active-LOW (water actively detected on plate)
     return {
-        label: isDetected ? 'RAIN DETECTED' : 'NO RAIN',
-        isRain: isDetected,
-        raw: rawVal
+        label: 'Heavy Rain',
+        category: 'HIGH',
+        badgeClass: 'bg-danger text-white',
+        isRain: true
     };
 }
 
@@ -83,15 +139,15 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchLatestData();
     fetchHistoryData(currentChartRange);
 
-    // Setup polling: Real-time cards every 3 seconds
+    // Setup polling: Auto-refresh real-time cards every 4 seconds without manual reload
     setInterval(() => {
         fetchLatestData();
-    }, 3000);
+    }, 4000);
 
-    // Setup polling: Charts and history logs every 10 seconds
+    // Setup polling: Charts and history logs every 8 seconds
     setInterval(() => {
         fetchHistoryData(currentChartRange);
-    }, 10000);
+    }, 8000);
 
     // Setup UI event listeners
     setupUIListeners();
@@ -160,22 +216,36 @@ async function fetchLatestData() {
         const sidebarNodeId = document.getElementById('sidebar-node-id');
 
         // 1. ESP32 Connection Status
-        const isOnline = data.device && data.device.is_online;
+        const isOnline = Boolean(data.device && data.device.is_online);
         const deviceId = data.device && data.device.device_id ? data.device.device_id : 'ESP32_FARM_01';
         if (sidebarNodeId) sidebarNodeId.innerText = deviceId;
 
+        // Display offline warning banner if ESP32 stops transmitting
+        const offlineNotice = document.getElementById('device-offline-notice');
+        if (offlineNotice) {
+            if (isOnline || !data.reading) {
+                offlineNotice.classList.add('d-none');
+            } else {
+                offlineNotice.classList.remove('d-none');
+            }
+        }
+
         if (isOnline) {
-            deviceStatusBadge.className = 'badge bg-success connection-badge d-flex align-items-center gap-1';
-            deviceStatusText.innerText = 'ESP32 ONLINE';
-            valDeviceState.innerText = 'ONLINE';
-            valDeviceState.className = 'card-value mb-0 fs-3 text-success';
+            if (deviceStatusBadge) deviceStatusBadge.className = 'badge bg-success connection-badge d-flex align-items-center gap-1';
+            if (deviceStatusText) deviceStatusText.innerText = 'ESP32 ONLINE';
+            if (valDeviceState) {
+                valDeviceState.innerText = 'ONLINE';
+                valDeviceState.className = 'card-value mb-0 fs-3 text-success';
+            }
             if (sidebarPulseDot) sidebarPulseDot.className = 'status-pulse-dot online';
             if (sidebarNodeStatus) sidebarNodeStatus.innerText = 'Connected & Active';
         } else {
-            deviceStatusBadge.className = 'badge bg-secondary connection-badge d-flex align-items-center gap-1';
-            deviceStatusText.innerText = 'ESP32 OFFLINE';
-            valDeviceState.innerText = 'OFFLINE';
-            valDeviceState.className = 'card-value mb-0 fs-3 text-secondary';
+            if (deviceStatusBadge) deviceStatusBadge.className = 'badge bg-secondary connection-badge d-flex align-items-center gap-1';
+            if (deviceStatusText) deviceStatusText.innerText = 'ESP32 OFFLINE';
+            if (valDeviceState) {
+                valDeviceState.innerText = 'OFFLINE';
+                valDeviceState.className = 'card-value mb-0 fs-3 text-secondary';
+            }
             if (sidebarPulseDot) sidebarPulseDot.className = 'status-pulse-dot';
             if (sidebarNodeStatus) sidebarNodeStatus.innerText = 'Disconnected';
         }
@@ -183,6 +253,15 @@ async function fetchLatestData() {
         // 2. Sensor Readings Update
         const reading = data.reading;
         if (reading) {
+            // Out-of-order packet protection: Older readings must not overwrite newer readings
+            if (reading.id && reading.id < lastProcessedReadingId) {
+                console.warn(`Skipping older packet id #${reading.id} (Current: #${lastProcessedReadingId})`);
+                return;
+            }
+            if (reading.id) {
+                lastProcessedReadingId = reading.id;
+            }
+
             if (noDataNotice) noDataNotice.classList.add('d-none');
 
             // Format timestamp
@@ -191,58 +270,85 @@ async function fetchLatestData() {
             if (valLastSeenHeader) valLastSeenHeader.innerText = `Sync: ${timePart}`;
             if (valLastSeenCard) valLastSeenCard.innerText = `Last data: ${recordedAt}`;
 
-            // Temperature
+            // 1. Temperature in °C & Category (LOW, MEDIUM, HIGH)
             const tempVal = parseFloat(reading.temperature);
-            document.getElementById('val-temperature').innerText = `${tempVal.toFixed(1)} °C`;
+            const valTemp = document.getElementById('val-temperature');
+            if (valTemp) valTemp.innerText = `${tempVal.toFixed(1)} °C`;
             const tempCat = getTemperatureCategory(tempVal);
-            const tempBadge = document.getElementById('badge-temp-category');
-            if (tempBadge) {
-                tempBadge.innerText = tempCat.label;
-                tempBadge.className = `badge ${tempCat.badgeClass} category-badge`;
+            const badgeTemp = document.getElementById('badge-temp-category');
+            if (badgeTemp) {
+                badgeTemp.innerText = tempCat.label;
+                badgeTemp.className = `badge ${tempCat.badgeClass} category-badge`;
             }
 
-            // Humidity
+            // 2. Humidity in % & Category (LOW, MEDIUM, HIGH)
             const humVal = parseFloat(reading.humidity);
-            document.getElementById('val-humidity').innerText = `${humVal.toFixed(1)} %`;
+            const valHum = document.getElementById('val-humidity');
+            if (valHum) valHum.innerText = `${humVal.toFixed(1)} %`;
             const humCat = getHumidityCategory(humVal);
-            const humBadge = document.getElementById('badge-hum-category');
-            if (humBadge) {
-                humBadge.innerText = humCat.label;
-                humBadge.className = `badge ${humCat.badgeClass} category-badge`;
+            const badgeHum = document.getElementById('badge-hum-category');
+            if (badgeHum) {
+                badgeHum.innerText = humCat.label;
+                badgeHum.className = `badge ${humCat.badgeClass} category-badge`;
             }
 
-            // Rain Monitoring
+            // 3. Rain Status (NO RAIN / LIGHT RAIN / MEDIUM RAIN / HEAVY RAIN)
             const rainStatus = getRainStatus(reading);
             const valRainStatus = document.getElementById('val-rain-status');
-            const valRainRaw = document.getElementById('val-rain-raw');
+            const badgeRain = document.getElementById('badge-rain-category');
             const rainIcon = document.getElementById('rain-card-icon');
             const rainIconBox = document.getElementById('rain-icon-box');
+            const cardRain = document.getElementById('card-rain');
+            const rainConditionLabel = document.getElementById('rain-condition-label');
 
             if (valRainStatus) {
                 valRainStatus.innerText = rainStatus.label;
-                valRainStatus.className = `card-value mb-0 ${rainStatus.isRain ? 'text-primary' : 'text-dark'}`;
+                valRainStatus.className = `card-value mb-0 fw-bold ${rainStatus.isRain ? 'text-primary' : 'text-dark'}`;
             }
-            if (valRainRaw) {
-                valRainRaw.innerText = `Raw: ${rainStatus.raw}`;
+            if (badgeRain) {
+                badgeRain.innerText = rainStatus.category;
+                badgeRain.className = `badge ${rainStatus.badgeClass} category-badge`;
             }
             if (rainIcon) {
-                rainIcon.className = rainStatus.isRain ? 'bi bi-cloud-rain-fill text-primary' : 'bi bi-cloud-sun text-secondary';
+                if (!rainStatus.isRain) {
+                    rainIcon.className = 'bi bi-cloud-sun text-secondary';
+                } else if (rainStatus.category === 'HIGH') {
+                    rainIcon.className = 'bi bi-cloud-rain-heavy-fill text-danger';
+                } else if (rainStatus.category === 'MEDIUM') {
+                    rainIcon.className = 'bi bi-cloud-rain text-success';
+                } else {
+                    rainIcon.className = 'bi bi-cloud-drizzle text-primary';
+                }
             }
             if (rainIconBox) {
                 rainIconBox.style.backgroundColor = rainStatus.isRain ? '#cff4fc' : '#e0f7fa';
             }
+            if (cardRain) {
+                if (rainStatus.isRain) {
+                    cardRain.className = `card summary-card border ${rainStatus.category === 'HIGH' ? 'border-danger' : 'border-primary'} border-2 shadow h-100`;
+                } else {
+                    cardRain.className = 'card summary-card border-0 shadow-sm h-100';
+                }
+            }
+            if (rainConditionLabel) {
+                rainConditionLabel.innerHTML = rainStatus.isRain ? 
+                    `<i class="bi bi-droplet-fill text-primary me-1"></i>${rainStatus.label}` : 
+                    '<i class="bi bi-shield-check text-success me-1"></i>Plate Dry';
+            }
 
-            // 3. Update Farmer Alerts
+            // 4. Update Farmer Alerts
             updateFarmerAlerts(tempVal, humVal, rainStatus.isRain);
 
         } else {
             // No telemetry yet
             if (noDataNotice) noDataNotice.classList.remove('d-none');
-            document.getElementById('val-temperature').innerText = '-- °C';
-            document.getElementById('val-humidity').innerText = '-- %';
-            document.getElementById('val-rain-status').innerText = 'NO RAIN';
+            const valTemp = document.getElementById('val-temperature');
+            const valHum = document.getElementById('val-humidity');
+            const valRain = document.getElementById('val-rain-status');
+            if (valTemp) valTemp.innerText = '-- °C';
+            if (valHum) valHum.innerText = '-- %';
+            if (valRain) valRain.innerText = 'No Water Detected';
             if (valLastSeenHeader) valLastSeenHeader.innerText = 'Sync: Waiting...';
-            if (valLastSeenCard) valLastSeenCard.innerText = 'Last data: Waiting...';
             updateFarmerAlerts(null, null, false);
         }
 
@@ -285,13 +391,13 @@ function updateFarmerAlerts(temp, hum, isRain) {
         });
     }
 
-    // 3. Rain Detected Alert
+    // 3. Rain / Water Detected Alert
     if (isRain) {
         activeAlerts.push({
             type: 'info',
             icon: 'bi-cloud-rain-fill text-primary',
-            title: 'Precipitation Alert',
-            message: 'Rainfall detected on the field sensor plate. Pause active irrigation channels.'
+            title: 'Water Alert',
+            message: 'Water detected on the field sensor plate. Pause active irrigation channels.'
         });
     }
 
@@ -371,7 +477,7 @@ function updateRecentTable(readings) {
     if (!tableBody) return;
 
     if (!readings || readings.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="5" class="text-muted py-4">Waiting for sensor data from ESP32...</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="4" class="text-muted py-4">Waiting for sensor data from ESP32...</td></tr>';
         return;
     }
 
@@ -392,21 +498,18 @@ function updateRecentTable(readings) {
                     ${escapeHtml(r.recorded_at || '--')}
                 </td>
                 <td>
-                    <strong>${tempVal.toFixed(1)} °C</strong>
+                    <strong class="fs-6">${tempVal.toFixed(1)} °C</strong>
                     <span class="badge ${tempCat.badgeClass} ms-1">${tempCat.label}</span>
                 </td>
                 <td>
-                    <strong>${humVal.toFixed(1)} %</strong>
+                    <strong class="fs-6">${humVal.toFixed(1)} %</strong>
                     <span class="badge ${humCat.badgeClass} ms-1">${humCat.label}</span>
                 </td>
                 <td>
-                    <span class="badge ${rainStatus.isRain ? 'bg-primary' : 'bg-light text-dark border'}">
-                        <i class="bi ${rainStatus.isRain ? 'bi-cloud-rain-fill' : 'bi-cloud'} me-1"></i>
-                        ${rainStatus.label}
+                    <span class="badge ${rainStatus.badgeClass} px-3 py-2">
+                        <i class="bi ${rainStatus.isRain ? (rainStatus.category === 'HIGH' ? 'bi-cloud-rain-heavy-fill' : 'bi-cloud-rain') : 'bi-cloud-sun'} me-1"></i>
+                        ${rainStatus.label} (${rainStatus.category})
                     </span>
-                </td>
-                <td>
-                    <code class="text-dark bg-light px-2 py-1 rounded border">${rainStatus.raw}</code>
                 </td>
             </tr>
         `;

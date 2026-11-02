@@ -83,13 +83,14 @@ class WeatherSystemTestCase(unittest.TestCase):
         print("[PASS] Heatwave Alert Triggered Correctly:", data["alerts_triggered"][0]["message"])
 
     def test_05_post_heavy_rain_and_trigger_alert(self):
-        """Test heavy rain triggering HEAVY_RAIN alert."""
+        """Test heavy rain triggering alert."""
         payload = {
             "device_id": "ESP32_FARM_01",
             "temperature": 22.0,
             "humidity": 92.0,     # Also triggers HIGH_HUMIDITY
-            "rain_value": 85,     # Exceeds 60% threshold
+            "rain_value": 0,      # Active-LOW digital pin 27: 0 = water detected
             "rain_detected": True,
+            "rain_status": "Rain Detected",
             "api_key": "WEATHER_FARM_KEY_2026"
         }
         res = self.client.post(
@@ -100,8 +101,8 @@ class WeatherSystemTestCase(unittest.TestCase):
         self.assertEqual(res.status_code, 201)
         data = res.get_json()
         triggered_types = [a["alert_type"] for a in data["alerts_triggered"]]
-        self.assertIn("HEAVY_RAIN", triggered_types)
-        print("[PASS] Heavy Rain & High Humidity Alerts Triggered Correctly:", triggered_types)
+        self.assertTrue("RAIN_DETECTED" in triggered_types or "HEAVY_RAIN" in triggered_types)
+        print("[PASS] Rain & High Humidity Alerts Triggered Correctly:", triggered_types)
 
     def test_06_get_latest_sensor_data(self):
         """Test retrieving latest sensor readings and advisory."""
@@ -193,6 +194,64 @@ class WeatherSystemTestCase(unittest.TestCase):
         data = res.get_json()
         self.assertLess(data["data"]["temperature"], 10.0)
         print(f"[PASS] Simulation Scenario 'frost' Tested: Temp={data['data']['temperature']}C")
+
+    def test_13_esp32_active_low_rain_detection(self):
+        """Test ESP32 active-LOW rain detection ingestion (0 = Water Detected, 1 = No Water Detected)."""
+        # Test 1: Wet Sensor reading
+        wet_payload = {
+            "device_id": "ESP32_FARM_01",
+            "temperature": 29.0,
+            "humidity": 75.0,
+            "rain_status": "Water Detected",
+            "rain_detected": True,
+            "rain_value": 0
+        }
+        res_wet = self.client.post(
+            "/api/sensor-data",
+            data=json.dumps(wet_payload),
+            content_type="application/json"
+        )
+        self.assertEqual(res_wet.status_code, 201)
+        wet_data = res_wet.get_json()
+        self.assertTrue(wet_data["data"]["rain_detected"])
+        self.assertEqual(wet_data["data"]["rain_status"], "Water Detected")
+        self.assertEqual(wet_data["data"]["rain_value"], 0)
+
+        # Verify latest endpoint reflects water detected
+        res_latest_wet = self.client.get("/api/sensor-data/latest")
+        self.assertEqual(res_latest_wet.status_code, 200)
+        latest_wet = res_latest_wet.get_json()
+        self.assertTrue(latest_wet["reading"]["rain_detected"])
+        self.assertEqual(latest_wet["reading"]["rain_status"], "Water Detected")
+
+        # Test 2: Dry Sensor reading
+        dry_payload = {
+            "device_id": "ESP32_FARM_01",
+            "temperature": 29.0,
+            "humidity": 75.0,
+            "rain_status": "No Water Detected",
+            "rain_detected": False,
+            "rain_value": 1
+        }
+        res_dry = self.client.post(
+            "/api/sensor-data",
+            data=json.dumps(dry_payload),
+            content_type="application/json"
+        )
+        self.assertEqual(res_dry.status_code, 201)
+        dry_data = res_dry.get_json()
+        self.assertFalse(dry_data["data"]["rain_detected"])
+        self.assertEqual(dry_data["data"]["rain_status"], "No Water Detected")
+        self.assertEqual(dry_data["data"]["rain_value"], 1)
+
+        # Verify latest endpoint reflects no water detected
+        res_latest_dry = self.client.get("/api/sensor-data/latest")
+        self.assertEqual(res_latest_dry.status_code, 200)
+        latest_dry = res_latest_dry.get_json()
+        self.assertFalse(latest_dry["reading"]["rain_detected"])
+        self.assertEqual(latest_dry["reading"]["rain_status"], "No Water Detected")
+
+        print("[PASS] ESP32 Active-LOW Water Detection Ingestion & Retrieval Verified")
 
 
 if __name__ == "__main__":

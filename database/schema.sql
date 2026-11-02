@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
     humidity DECIMAL(5, 2) NOT NULL COMMENT 'Relative Humidity in percentage',
     rain_value INT NOT NULL COMMENT 'Raw ADC / Normalized rain value (0-100 or 0-4095)',
     rain_detected TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 if rain is actively detected, 0 otherwise',
+    rain_status VARCHAR(50) DEFAULT 'No Rain' COMMENT 'Text status: Rain Detected / No Rain',
     rain_level VARCHAR(30) DEFAULT 'No Rain' COMMENT 'No Rain, Light Rain, Moderate Rain, Heavy Rain',
     recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_recorded_at (recorded_at),

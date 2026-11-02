@@ -36,18 +36,18 @@
 ---
 
 ### B. Rain Sensor Module (FC-37 Rain Board + LM393 Comparator)
-The rain collection board connects to the 2-pin header on the LM393 comparator module using 2 male-to-female jumper wires (polarity does not matter between board and comparator).
+The rain collection board connects to the 2-pin header on the LM393 comparator module using 2 female-to-female jumper wires (polarity does not matter between plate and comparator).
 
-*From the LM393 4-pin output header to ESP32:*
+*From the LM393 comparator module to ESP32:*
 - **VCC** $\rightarrow$ **ESP32 3.3V** (or VIN)
 - **GND** $\rightarrow$ **ESP32 GND**
-- **A0 (Analog Output)** $\rightarrow$ **ESP32 GPIO 34 (ADC1_CH6)**
-- **D0 (Digital Output)** $\rightarrow$ **ESP32 GPIO 18**
+- **D0 (Digital Output)** $\rightarrow$ **ESP32 GPIO 0**
 
-> [!IMPORTANT]
-> **Why GPIO 34 for Analog Input? (Key MCA Viva Question)**  
-> The ESP32 has two Analog-to-Digital Converters: **ADC1** and **ADC2**. When the ESP32 Wi-Fi module is turned ON, **ADC2 is internally utilized by the Wi-Fi driver**, causing ADC2 pins (GPIO 0, 2, 4, 12, 13, 14, 15, 25, 26, 27) to return false or erratic analog values.  
-> **GPIO 34 belongs to ADC1**, which remains 100% operational alongside active Wi-Fi transmission.
+> [!NOTE]
+> **Active-LOW Digital Rain Detection:**
+> - When dry: Sensor pin outputs `HIGH` (1) $\rightarrow$ Status: **No Water Detected**
+> - When water touches the plate: Sensor pin outputs `LOW` (0) $\rightarrow$ Status: **Water Detected**
+> - Adjust the blue potentiometer on the LM393 comparator module to tune moisture sensitivity.
 
 ---
 
